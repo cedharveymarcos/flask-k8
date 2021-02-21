@@ -1,0 +1,100 @@
+name: CI-CD to Minikube
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-to-minikube:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_NAME: ghcr.io/af1nzr/flask-k8
+      NAMESPACE: flask-k8-namespace
+      HOST_NAME: flask-k8.example.com
+
+    steps:
+    # ✅ Checkout repository
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    # ✅ Install Minikube inside runner
+    - name: Setup Minikube
+      uses: medyagh/setup-minikube@latest
+
+    # ✅ Verify Minikube Cluster
+    - name: Check Minikube Status
+      run: kubectl get nodes
+
+    # ✅ Login to GHCR
+    - name: Docker login to GHCR
+      run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+
+    # ✅ Build & Push Docker Image
+    - name: Build & Push Docker Image
+      run: |
+        IMAGE_TAG=${IMAGE_NAME}:${GITHUB_SHA::7}
+        echo "Using IMAGE_TAG=$IMAGE_TAG"
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+    # ✅ Create Kubernetes namespace if not exists
+    - name: Create Namespace
+      run: |
+        kubectl get ns $NAMESPACE || kubectl create ns $NAMESPACE
+
+    # ✅ Create Kubernetes Secret for GHCR
+    - name: Create Docker Registry Secret
+      run: |
+        kubectl delete secret ghcr-secret -n $NAMESPACE --ignore-not-found
+        kubectl create secret docker-registry ghcr-secret \
+          --docker-server=ghcr.io \
+          --docker-username=${{ secrets.GHCR_USERNAME }} \
+          --docker-password=${{ secrets.GHCR_TOKEN }} \
+          --namespace $NAMESPACE
+
+    # ✅ Deploy Kubernetes Manifests
+    - name: Apply Kubernetes Manifests
+      run: |
+        kubectl apply -n $NAMESPACE -f k8/deployment.yml
+        kubectl apply -n $NAMESPACE -f k8/service.yml
+        kubectl apply -n $NAMESPACE -f k8/ingress.yml
+
+    # ✅ Install ingress controller & wait
+    - name: Install Ingress Controller
+      run: |
+        echo "🔄 Enabling Minikube ingress addon..."
+        minikube addons enable ingress
+        
+        echo "⏳ Waiting for ingress-nginx-controller..."
+        kubectl wait --namespace ingress-nginx \
+          --for=condition=available deployment/ingress-nginx-controller --timeout=180s || \
+          (echo "Ingress controller not ready! Debug:" && kubectl get pods -n ingress-nginx && exit 1)
+
+    # ✅ Debug current state (pods, services, ingress)
+    - name: Debug Kubernetes State
+      run: |
+        echo "📦 Pods:"
+        kubectl get pods -n $NAMESPACE
+        echo "🛠 Services:"
+        kubectl get svc -n $NAMESPACE
+        echo "🌐 Ingress:"
+        kubectl get ingress -n $NAMESPACE
+        echo "🌍 Ingress Controller Pods:"
+        kubectl get pods -n ingress-nginx
+
+    # ✅ Add Host Entry
+    - name: Add Host Entry
+      run: |
+        MINIKUBE_IP=$(minikube ip)
+        echo "Minikube IP is $MINIKUBE_IP"
+        echo "$MINIKUBE_IP $HOST_NAME" | sudo tee -a /etc/hosts
+
+    # ✅ Test Deployed App
+    - name: Test App via Ingress
+      run: |
+        echo "Waiting 15 seconds for ingress routes..."
+        sleep 15
+        curl -v --max-time 20 http://$HOST_NAME || (echo "❌ Failed to connect, printing logs:" && kubectl describe ingress -n $NAMESPACE && exit 1)
