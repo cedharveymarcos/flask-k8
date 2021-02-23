@@ -1,0 +1,12 @@
+flask-k8s-app/
+├── app.py
+├── requirements.txt
+├── Dockerfile
+├── .github/
+│   └── workflows/
+│       └── docker-build.yml
+├── k8/
+│   ├── deployment.yml
+│   ├── service.yml
+│   └── ingress.yml
+└── README.md
